@@ -58,60 +58,73 @@ class ImageCropActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         val uri = intent.data
         if (uri == null) {
+            setResult(RESULT_CANCELED)
             finish()
             return
         }
 
-        I18n.init(this)
-        WindowCompat.setDecorFitsSystemWindows(window, false)
-        @Suppress("DEPRECATION")
-        window.statusBarColor = Color.TRANSPARENT
-        @Suppress("DEPRECATION")
-        window.navigationBarColor = Color.TRANSPARENT
-        cropView = SquareCropView(this)
-        status = tr("crop.loading")
+        try {
+            I18n.init(this)
+            WindowCompat.setDecorFitsSystemWindows(window, false)
+            @Suppress("DEPRECATION")
+            window.statusBarColor = Color.TRANSPARENT
+            @Suppress("DEPRECATION")
+            window.navigationBarColor = Color.TRANSPARENT
+            cropView = SquareCropView(this)
+            status = tr("crop.loading")
 
-        // The crop surface stays a view; the chrome follows the Lavender system.
-        val chrome = ComposeView(this).apply {
-            setContent {
-                XcertplayTheme(darkTheme = true) { CropChrome() }
+            // The crop surface stays a view; the chrome follows the Lavender system.
+            val chrome = ComposeView(this).apply {
+                setContent {
+                    XcertplayTheme(darkTheme = true) { CropChrome() }
+                }
             }
+            val root = FrameLayout(this).apply {
+                setBackgroundColor(Color.BLACK)
+                addView(
+                    cropView,
+                    FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                    ),
+                )
+                addView(
+                    chrome,
+                    FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                    ),
+                )
+            }
+            setContentView(root)
+        } catch (error: Throwable) {
+            android.util.Log.e(TAG, "Failed to initialize crop activity", error)
+            setResult(RESULT_CANCELED)
+            finish()
+            return
         }
-        val root = FrameLayout(this).apply {
-            setBackgroundColor(Color.BLACK)
-            addView(
-                cropView,
-                FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                ),
-            )
-            addView(
-                chrome,
-                FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                ),
-            )
-        }
-        setContentView(root)
 
         executor.execute {
             val bitmap = try {
                 decodeBitmap(uri)
-            } catch (_: Exception) {
+            } catch (error: Throwable) {
+                android.util.Log.e(TAG, "Failed to decode image", error)
                 null
             }
             runOnUiThread {
-                if (isFinishing || isDestroyed) {
-                    bitmap?.recycle()
-                    return@runOnUiThread
-                }
-                if (bitmap == null) {
-                    status = tr("crop.decode_failed")
-                } else {
-                    cropView.setBitmap(bitmap)
-                    status = tr("crop.help")
+                try {
+                    if (isFinishing || isDestroyed) {
+                        bitmap?.recycle()
+                        return@runOnUiThread
+                    }
+                    if (bitmap == null) {
+                        status = tr("crop.decode_failed")
+                    } else {
+                        cropView.setBitmap(bitmap)
+                        status = tr("crop.help")
+                    }
+                } catch (error: Throwable) {
+                    android.util.Log.e(TAG, "Failed to update UI with decoded bitmap", error)
                 }
             }
         }
@@ -124,12 +137,24 @@ class ImageCropActivity : ComponentActivity() {
     }
 
     private fun saveCrop() {
-        val cropped = cropView.cropToSquare() ?: run {
+        val cropped = try {
+            cropView.cropToSquare()
+        } catch (error: Throwable) {
+            android.util.Log.e(TAG, "Failed to crop bitmap", error)
+            null
+        } ?: run {
             status = tr("crop.not_ready")
             return
         }
         val encoded = ByteArrayOutputStream().use { output ->
-            if (!cropped.compress(Bitmap.CompressFormat.PNG, 100, output)) {
+            try {
+                if (!cropped.compress(Bitmap.CompressFormat.PNG, 100, output)) {
+                    cropped.recycle()
+                    status = tr("crop.encode_failed")
+                    return
+                }
+            } catch (error: Throwable) {
+                android.util.Log.e(TAG, "Failed to encode bitmap", error)
                 cropped.recycle()
                 status = tr("crop.encode_failed")
                 return
@@ -144,7 +169,8 @@ class ImageCropActivity : ComponentActivity() {
                 Intent().putExtra(EXTRA_CROP_COMPLETE, true),
             )
             finish()
-        } catch (_: Exception) {
+        } catch (error: Throwable) {
+            android.util.Log.e(TAG, "Failed to save custom AirPlay icon", error)
             status = tr("crop.save_failed")
         }
     }
@@ -185,8 +211,13 @@ class ImageCropActivity : ComponentActivity() {
 
     private fun decodeBitmap(uri: Uri): Bitmap? {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        contentResolver.openInputStream(uri)?.use {
-            BitmapFactory.decodeStream(it, null, bounds)
+        try {
+            contentResolver.openInputStream(uri)?.use {
+                BitmapFactory.decodeStream(it, null, bounds)
+            }
+        } catch (error: Throwable) {
+            android.util.Log.e(TAG, "Failed to read image bounds from $uri", error)
+            return null
         }
         if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
 
@@ -197,9 +228,15 @@ class ImageCropActivity : ComponentActivity() {
         val options = BitmapFactory.Options().apply {
             inSampleSize = sampleSize
             inPreferredConfig = Bitmap.Config.ARGB_8888
+            inJustDecodeBounds = false
         }
-        return contentResolver.openInputStream(uri)?.use {
-            BitmapFactory.decodeStream(it, null, options)
+        return try {
+            contentResolver.openInputStream(uri)?.use {
+                BitmapFactory.decodeStream(it, null, options)
+            }
+        } catch (error: Throwable) {
+            android.util.Log.e(TAG, "Failed to decode image from $uri", error)
+            null
         }
     }
 
@@ -336,20 +373,43 @@ class ImageCropActivity : ComponentActivity() {
             val square = min(right - left, bottom - top)
             val centerX = (left + right) / 2
             val centerY = (top + bottom) / 2
-            val cropLeft = (centerX - square / 2).coerceIn(0, source.width - square)
-            val cropTop = (centerY - square / 2).coerceIn(0, source.height - square)
-            val cropped = Bitmap.createBitmap(source, cropLeft, cropTop, square, square)
-            val output = Bitmap.createBitmap(
-                OUTPUT_ICON_PIXELS,
-                OUTPUT_ICON_PIXELS,
-                Bitmap.Config.ARGB_8888,
-            )
-            Canvas(output).drawBitmap(
-                cropped,
-                null,
-                RectF(0f, 0f, OUTPUT_ICON_PIXELS.toFloat(), OUTPUT_ICON_PIXELS.toFloat()),
-                imagePaint,
-            )
+            val cropLeft = (centerX - square / 2).coerceIn(0, (source.width - square).coerceAtLeast(0))
+            val cropTop = (centerY - square / 2).coerceIn(0, (source.height - square).coerceAtLeast(0))
+            if (cropLeft + square > source.width || cropTop + square > source.height ||
+                square <= 0
+            ) {
+                return null
+            }
+            val cropped = try {
+                Bitmap.createBitmap(source, cropLeft, cropTop, square, square)
+            } catch (error: Throwable) {
+                android.util.Log.e(TAG, "Bitmap.createBitmap failed", error)
+                return null
+            }
+            val output = try {
+                Bitmap.createBitmap(
+                    OUTPUT_ICON_PIXELS,
+                    OUTPUT_ICON_PIXELS,
+                    Bitmap.Config.ARGB_8888,
+                )
+            } catch (error: Throwable) {
+                android.util.Log.e(TAG, "Bitmap.createBitmap output failed", error)
+                if (cropped !== source) cropped.recycle()
+                return null
+            }
+            try {
+                Canvas(output).drawBitmap(
+                    cropped,
+                    null,
+                    RectF(0f, 0f, OUTPUT_ICON_PIXELS.toFloat(), OUTPUT_ICON_PIXELS.toFloat()),
+                    imagePaint,
+                )
+            } catch (error: Throwable) {
+                android.util.Log.e(TAG, "Canvas drawBitmap failed", error)
+                output.recycle()
+                if (cropped !== source) cropped.recycle()
+                return null
+            }
             if (cropped !== source) cropped.recycle()
             return output
         }
@@ -412,6 +472,7 @@ class ImageCropActivity : ComponentActivity() {
     }
 
     companion object {
+        const val TAG = "ImageCropActivity"
         const val EXTRA_CROP_COMPLETE = "crop_complete"
         private const val MAX_DECODE_EDGE = 2048
         private const val OUTPUT_ICON_PIXELS = 1024

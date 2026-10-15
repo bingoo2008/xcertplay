@@ -307,18 +307,27 @@ class CarPlayHostActivity : ComponentActivity() {
                 externalActivityInProgress = false
                 return@registerForActivityResult
             }
-            imageCrop.launch(
-                Intent(this, ImageCropActivity::class.java)
-                    .setData(uri)
-                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
-            )
+            try {
+                imageCrop.launch(
+                    Intent(this, ImageCropActivity::class.java)
+                        .setData(uri)
+                        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
+                )
+            } catch (error: Throwable) {
+                Log.e(TAG, "Failed to launch ImageCropActivity", error)
+                externalActivityInProgress = false
+            }
         }
     private val imageCrop =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
             externalActivityInProgress = false
             if (result.resultCode == RESULT_OK) {
-                updateAirPlayIconPreview()
-                appendLog("Custom AirPlay icon updated")
+                try {
+                    updateAirPlayIconPreview()
+                    appendLog("Custom AirPlay icon updated")
+                } catch (error: Throwable) {
+                    Log.e(TAG, "Failed to update AirPlay icon preview after crop", error)
+                }
             }
         }
     private val localMfiCertificatePicker =
@@ -1728,13 +1737,25 @@ class CarPlayHostActivity : ComponentActivity() {
             decodeAirPlayIcon(customBytes)?.let { return it }
             AirPlayPersistence.clearCustomAirPlayIcon(this)
         }
-        return decodeAirPlayIcon(defaultAirPlayIconBytes())
-            ?: throw IllegalStateException("Packaged AirPlay icon is invalid")
+        val defaultBytes = try {
+            defaultAirPlayIconBytes()
+        } catch (error: Throwable) {
+            Log.e(TAG, "Failed to load default AirPlay icon from resources", error)
+            return AirPlayIcon(1, 1, DEFAULT_FALLBACK_ICON_PNG)
+        }
+        return decodeAirPlayIcon(defaultBytes)
+            ?: AirPlayIcon(1, 1, DEFAULT_FALLBACK_ICON_PNG)
     }
 
     private fun decodeAirPlayIcon(encoded: ByteArray): AirPlayIcon? {
+        if (encoded.isEmpty()) return null
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeByteArray(encoded, 0, encoded.size, bounds)
+        try {
+            BitmapFactory.decodeByteArray(encoded, 0, encoded.size, bounds)
+        } catch (error: Throwable) {
+            Log.e(TAG, "decodeAirPlayIcon: failed to decode bytes", error)
+            return null
+        }
         if (bounds.outWidth <= 0 || bounds.outHeight <= 0 ||
             bounds.outWidth != bounds.outHeight
         ) {
@@ -1747,16 +1768,37 @@ class CarPlayHostActivity : ComponentActivity() {
         resources.openRawResource(R.raw.placeholder_icon).use { it.readBytes() }
 
     private fun updateAirPlayIconPreview() {
-        val custom = AirPlayPersistence.loadCustomAirPlayIconFile(this)
+        val custom = try {
+            AirPlayPersistence.loadCustomAirPlayIconFile(this)
+        } catch (error: Throwable) {
+            Log.e(TAG, "Failed to load custom AirPlay icon file", error)
+            null
+        }
         var customBitmap: Bitmap? = null
         if (custom != null) {
-            customBitmap = BitmapFactory.decodeFile(custom.absolutePath)
-            if (customBitmap == null) {
+            try {
+                customBitmap = BitmapFactory.decodeFile(custom.absolutePath)
+                if (customBitmap == null) {
+                    AirPlayPersistence.clearCustomAirPlayIcon(this)
+                }
+            } catch (error: Throwable) {
+                Log.e(TAG, "Failed to decode custom AirPlay icon", error)
                 AirPlayPersistence.clearCustomAirPlayIcon(this)
+                customBitmap = null
             }
         }
-        val bitmap = customBitmap ?: BitmapFactory.decodeResource(resources, R.raw.placeholder_icon)
-        airPlayIcon = bitmap?.asImageBitmap()
+        val bitmap = try {
+            customBitmap ?: BitmapFactory.decodeResource(resources, R.raw.placeholder_icon)
+        } catch (error: Throwable) {
+            Log.e(TAG, "Failed to decode default AirPlay icon resource", error)
+            customBitmap
+        }
+        airPlayIcon = try {
+            bitmap?.asImageBitmap()
+        } catch (error: Throwable) {
+            Log.e(TAG, "Failed to convert AirPlay icon to ImageBitmap", error)
+            null
+        }
         airPlayIconCustom = customBitmap != null
     }
 
@@ -3832,8 +3874,12 @@ class CarPlayHostActivity : ComponentActivity() {
                     }) { Text(tr("settings.identity.icon.choose"), style = MaterialTheme.typography.labelLarge) }
                     TextButton(
                         onClick = {
-                            AirPlayPersistence.clearCustomAirPlayIcon(this@CarPlayHostActivity)
-                            updateAirPlayIconPreview()
+                            try {
+                                AirPlayPersistence.clearCustomAirPlayIcon(this@CarPlayHostActivity)
+                                updateAirPlayIconPreview()
+                            } catch (error: Throwable) {
+                                Log.e(TAG, "Failed to reset AirPlay icon to default", error)
+                            }
                         },
                         enabled = airPlayIconCustom,
                     ) { Text(tr("settings.identity.icon.reset"), style = MaterialTheme.typography.labelLarge) }
@@ -4149,6 +4195,18 @@ class CarPlayHostActivity : ComponentActivity() {
         val TWO_PANE_MIN_WIDTH = 720.dp
         val CATEGORY_PANE_WIDTH = 320.dp
         val NO_VIDEO_BACKGROUND = Color.BLACK
+        // Minimal 1x1 RGBA PNG as a last-resort fallback when the packaged icon cannot be loaded.
+        val DEFAULT_FALLBACK_ICON_PNG = byteArrayOf(
+            -119, 80, 78, 71, 13, 10, 26, 10,
+            0, 0, 0, 13, 73, 72, 68, 82,
+            0, 0, 0, 1, 0, 0, 0, 1,
+            8, 6, 0, 0, 0, 31, 21, -60,
+            -119, 0, 0, 0, 13, 73, 68, 65,
+            84, 120, -100, 99, -8, -1, -1, 63,
+            3, 0, 8, -4, 2, -2, -89, -102,
+            -96, -96, 0, 0, 0, 0, 73, 69,
+            78, 68, -82, 66, 96, -126,
+        )
     }
 
     private data class DisplaySize(val width: Int, val height: Int)
