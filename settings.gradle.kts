@@ -11,9 +11,8 @@ pluginManagement {
         gradlePluginPortal()
     }
 }
-plugins {
-    id("org.gradle.toolchains.foojay-resolver-convention") version "1.0.0"
-}
+// foojay-resolver-convention was removed. Gradle 9+ has built-in Java toolchain
+// auto-resolution; older versions will need to add it back.
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
