@@ -571,8 +571,11 @@ class CarPlayHostActivity : ComponentActivity() {
     private var gestureTracking = false
     private var gestureStartX = 0f
     private var gestureStartY = 0f
+    private var edgeSettingsGesturePending = false
     private var edgeSettingsGestureCaptured = false
     private var edgeSettingsGestureEligible = false
+    private var edgeSettingsGestureStartX = 0f
+    private var edgeSettingsGestureStartY = 0f
     private val shuttingDown = AtomicBoolean(false)
     private val mainHandler = Handler(Looper.getMainLooper())
     // Only exitApplication shuts these down, and Activities are recreated often (language,
@@ -2666,13 +2669,22 @@ class CarPlayHostActivity : ComponentActivity() {
             MotionEvent.ACTION_DOWN -> {
                 gestureSequenceActive = false
                 gestureTracking = false
-                edgeSettingsGestureCaptured = moreGesturesToSettings &&
+                // Watching the edge is not the same as capturing it: the down is forwarded so a
+                // plain tap on the phone's top-left controls (back, tabs) still reaches CarPlay.
+                // Only an actual downward edge swipe takes the gesture over.
+                edgeSettingsGesturePending = moreGesturesToSettings &&
                     event.x in 0f..(view.width / 8f) &&
                     event.y in 0f..(view.height / 4f)
-                edgeSettingsGestureEligible = edgeSettingsGestureCaptured
+                edgeSettingsGestureCaptured = false
+                edgeSettingsGestureEligible = edgeSettingsGesturePending
+                if (edgeSettingsGesturePending) {
+                    edgeSettingsGestureStartX = event.x
+                    edgeSettingsGestureStartY = event.y
+                }
             }
             MotionEvent.ACTION_POINTER_DOWN -> {
                 if (event.pointerCount == THREE_FINGER_COUNT && !gestureSequenceActive) {
+                    edgeSettingsGesturePending = false
                     edgeSettingsGestureCaptured = false
                     edgeSettingsGestureEligible = false
                     gestureSequenceActive = true
@@ -2684,6 +2696,44 @@ class CarPlayHostActivity : ComponentActivity() {
                     return true
                 }
             }
+        }
+
+        if (edgeSettingsGesturePending) {
+            when (event.actionMasked) {
+                MotionEvent.ACTION_MOVE -> {
+                    if (event.pointerCount != 1) {
+                        edgeSettingsGesturePending = false
+                        edgeSettingsGestureEligible = false
+                    } else {
+                        val deltaX = Math.abs(event.x - edgeSettingsGestureStartX)
+                        val deltaY = event.y - edgeSettingsGestureStartY
+                        if (deltaY >= dp(EDGE_SETTINGS_SWIPE_DISTANCE_DP) &&
+                            deltaY >= deltaX * EDGE_SETTINGS_SWIPE_DIRECTION_RATIO
+                        ) {
+                            // Once the swipe is recognised, cancel the touch CarPlay already saw and
+                            // keep the rest of the gesture for opening settings.
+                            edgeSettingsGesturePending = false
+                            edgeSettingsGestureCaptured = true
+                            edgeSettingsGestureEligible = true
+                            controller?.sendTouch(emptyList())
+                        } else if (deltaY < -dp(EDGE_SETTINGS_TOUCH_SLOP_DP) ||
+                            deltaX > dp(EDGE_SETTINGS_TOUCH_SLOP_DP)
+                        ) {
+                            // Not the edge gesture; stop watching and let the touch through.
+                            edgeSettingsGesturePending = false
+                            edgeSettingsGestureEligible = false
+                        } else {
+                            // Still within slop: a candidate tap keeps flowing to CarPlay.
+                            return forwardHostTouch(view, event)
+                        }
+                    }
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    edgeSettingsGesturePending = false
+                    edgeSettingsGestureEligible = false
+                }
+            }
+            if (!edgeSettingsGestureCaptured) return forwardHostTouch(view, event)
         }
 
         if (edgeSettingsGestureCaptured) {
@@ -2738,6 +2788,11 @@ class CarPlayHostActivity : ComponentActivity() {
             return true
         }
 
+        return forwardHostTouch(view, event)
+    }
+
+    /** Normalizes a touch to the active area (and the whole declared display) and sends it. */
+    private fun forwardHostTouch(view: View, event: MotionEvent): Boolean {
         if (mainWebDisplay.enabled && !mainWebDisplay.preview) return true
         val placement = mainAreaPlacement(view.width, view.height)
         val contacts = if (placement == null) {
@@ -4489,6 +4544,11 @@ class CarPlayHostActivity : ComponentActivity() {
         const val THREE_FINGER_COUNT = 3
         const val THREE_FINGER_SWIPE_DISTANCE_DP = 72
         const val THREE_FINGER_SWIPE_DIRECTION_RATIO = 1.15f
+        /** Distance a downward edge drag must cover before it stops being a tap on CarPlay. */
+        const val EDGE_SETTINGS_SWIPE_DISTANCE_DP = 48
+        const val EDGE_SETTINGS_SWIPE_DIRECTION_RATIO = 1.15f
+        /** Movement past the slop in another direction abandons the edge-settings gesture. */
+        const val EDGE_SETTINGS_TOUCH_SLOP_DP = 16
         val TWO_PANE_MIN_WIDTH = 720.dp
         val CATEGORY_PANE_WIDTH = 320.dp
         val NO_VIDEO_BACKGROUND = Color.BLACK

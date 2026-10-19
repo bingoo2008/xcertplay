@@ -141,6 +141,58 @@ internal object MicrophoneAudioMode {
     }
 }
 
+/**
+ * 电话音频使用 phone 策略，配合通信模式时默认走向听筒；车机没有听筒，通话就会没声音。
+ * 播放 CarPlay 电话流期间占用扬声器路由，结束时恢复之前的状态。
+ */
+internal object LoudspeakerAudioRoute {
+    private var leases: SpeakerphoneLeaseManager? = null
+
+    @Synchronized
+    fun acquire(context: Context): Closeable {
+        val manager = leases ?: run {
+            val audioManager =
+                context.applicationContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            SpeakerphoneLeaseManager(
+                readSpeakerphone = { audioManager.isSpeakerphoneOn },
+                writeSpeakerphone = { audioManager.isSpeakerphoneOn = it },
+            ).also { leases = it }
+        }
+        return manager.acquire()
+    }
+}
+
+/** 引用计数地保持扬声器路由，直到最后一个占用者释放。 */
+private class SpeakerphoneLeaseManager(
+    private val readSpeakerphone: () -> Boolean,
+    private val writeSpeakerphone: (Boolean) -> Unit,
+) {
+    private var users = 0
+    private var previousSpeakerphone = false
+    private var changedSpeakerphone = false
+
+    @Synchronized
+    fun acquire(): Closeable {
+        if (users == 0) {
+            previousSpeakerphone = readSpeakerphone()
+            changedSpeakerphone = !previousSpeakerphone
+            if (changedSpeakerphone) writeSpeakerphone(true)
+        }
+        users++
+        val closed = AtomicBoolean(false)
+        return Closeable {
+            if (closed.compareAndSet(false, true)) release()
+        }
+    }
+
+    @Synchronized
+    private fun release() {
+        check(users > 0)
+        users--
+        if (users == 0 && changedSpeakerphone) writeSpeakerphone(previousSpeakerphone)
+    }
+}
+
 /** Records the same stream used by CarPlay and reports the amplified peak every ~100 ms. */
 class MicrophoneLevelMonitor(
     context: Context,

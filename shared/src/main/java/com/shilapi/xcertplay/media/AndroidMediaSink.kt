@@ -218,6 +218,7 @@ class AndroidMediaSink(
         if (existing?.format == format) return existing
         existing?.close()
         return AudioRenderer(
+            context,
             type,
             format,
             advancedAudioChannelMapping,
@@ -785,6 +786,7 @@ private fun MediaFormat.intOrNull(key: String): Int? =
 
 /** Decodes AAC-LC/Opus to PCM and plays it, or plays wired LPCM directly. */
 private class AudioRenderer(
+    private val context: Context,
     private val stream: Int,
     val format: AudioFormat,
     private val advancedAudioChannelMapping: Boolean,
@@ -823,6 +825,9 @@ private class AudioRenderer(
     private var lastTimestampHeadRaw = 0L
     private var lastTimestampHeadFrames = 0L
     private var latestOutputLatencyMs: Float? = null
+    /** Communication mode and loudspeaker routing held while CarPlay telephone audio plays. */
+    private var phoneAudioModeLease: Closeable? = null
+    private var phoneAudioRouteLease: Closeable? = null
     @Volatile private var mediaMetricsMonitor = mediaMetricsMonitor
     private val thread = Thread(::run, "carplay-audio").apply { isDaemon = true }
 
@@ -899,6 +904,7 @@ private class AudioRenderer(
             Log.e(TAG, "AudioTrack buffer size unavailable rate=${format.sampleRate} channels=${format.channels}")
             return
         }
+        acquirePhoneAudioRoute()
         val configuredMainMediaBuffer = MainMediaAudioBuffer.isMainMedia(
             audioType = format.audioType,
             payloadType = format.payloadType,
@@ -944,6 +950,27 @@ private class AudioRenderer(
                     ""
                 },
         )
+    }
+
+    /**
+     * 电话音频走 phone 策略，配合通信模式默认输出到听筒；车机没有听筒就会静音。
+     * 播放期间同时占用通信模式和扬声器路由，流结束后立即归还。
+     */
+    private fun acquirePhoneAudioRoute() {
+        if (!format.audioType.equals(PHONE_AUDIO_TYPE, ignoreCase = true)) return
+        phoneAudioModeLease = runCatching { MicrophoneAudioMode.acquire(context) }
+            .onFailure { Log.w(TAG, "phone audio communication mode unavailable", it) }
+            .getOrNull()
+        phoneAudioRouteLease = runCatching { LoudspeakerAudioRoute.acquire(context) }
+            .onFailure { Log.w(TAG, "phone audio loudspeaker route unavailable", it) }
+            .getOrNull()
+    }
+
+    private fun releasePhoneAudioRoute() {
+        phoneAudioRouteLease?.close()
+        phoneAudioRouteLease = null
+        phoneAudioModeLease?.close()
+        phoneAudioModeLease = null
     }
 
     private fun aacAudioSpecificConfig(): ByteArray {
@@ -1283,10 +1310,12 @@ private class AudioRenderer(
                 // Best effort.
             }
         }
+        releasePhoneAudioRoute()
     }
 
     private companion object {
         const val TAG = "xcertplay-usb"
+        const val PHONE_AUDIO_TYPE = "telephony"
         const val MIN_OPUS_PACKET_BYTES = 4
         const val INPUT_TIMEOUT_US = 10_000L
         const val MAX_QUEUED_PACKETS = 64
