@@ -2,6 +2,7 @@ package com.shilapi.xcertplay.media
 
 import android.content.Context
 import android.media.AudioAttributes
+import android.media.AudioDeviceInfo
 import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.media.AudioFormat as AndroidAudioFormat
@@ -44,6 +45,7 @@ class AndroidMediaSink(
     private val videoHeight: Int = 720,
     private val preferSoftwareHevcDecoder: Boolean = false,
     private val advancedAudioChannelMapping: Boolean = false,
+    private val phoneNavigationOutput: AudioOutputPreference = AudioOutputPreference.DEFAULT,
     private val mainMediaAudioBufferDurationMs: Int = MainMediaAudioBuffer.DEFAULT_DURATION_MS,
     private val microphoneGainPercent: Int = MicrophoneGain.DEFAULT_PERCENT,
     mediaMetricsMonitor: MediaMetricsMonitor? = null,
@@ -222,6 +224,7 @@ class AndroidMediaSink(
             type,
             format,
             advancedAudioChannelMapping,
+            phoneNavigationOutput,
             mainMediaAudioBufferDurationMs,
             mediaMetricsMonitor,
             mediaTap,
@@ -784,12 +787,45 @@ private fun MediaFormat.intOrNull(key: String): Int? =
         }
     }
 
+/**
+ * 通话与导航音频的目标输出设备（例如车机头枕音响）。
+ * [deviceId] 小于 0 表示未指定，走系统默认路由；[deviceName] 供设备重新枚举后用名称兜底匹配。
+ */
+data class AudioOutputPreference(val deviceId: Int, val deviceName: String = "") {
+    val specified: Boolean get() = deviceId >= 0
+
+    companion object {
+        val DEFAULT = AudioOutputPreference(deviceId = -1)
+    }
+}
+
+/** 一个可选的输出设备（头枕音响、蓝牙、USB 等），供设置界面展示与选择。 */
+data class AudioOutputDevice(val id: Int, val name: String, val type: Int)
+
+/** 枚举当前可用的音频输出设备。 */
+object AudioOutputDevices {
+    fun list(context: Context): List<AudioOutputDevice> {
+        val audioManager = context.applicationContext
+            .getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return emptyList()
+        return runCatching { audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).toList() }
+            .getOrDefault(emptyList())
+            .map {
+                AudioOutputDevice(
+                    id = it.id,
+                    name = it.productName?.toString().orEmpty(),
+                    type = it.type,
+                )
+            }
+    }
+}
+
 /** Decodes AAC-LC/Opus to PCM and plays it, or plays wired LPCM directly. */
 private class AudioRenderer(
     private val context: Context,
     private val stream: Int,
     val format: AudioFormat,
     private val advancedAudioChannelMapping: Boolean,
+    private val phoneNavigationOutput: AudioOutputPreference,
     private val mainMediaAudioBufferDurationMs: Int,
     mediaMetricsMonitor: MediaMetricsMonitor?,
     private val mediaTap: MediaTap?,
@@ -904,7 +940,14 @@ private class AudioRenderer(
             Log.e(TAG, "AudioTrack buffer size unavailable rate=${format.sampleRate} channels=${format.channels}")
             return
         }
-        acquirePhoneAudioRoute()
+        val channel = channelSelection().channel
+        val selectableOutput = channel == AudioChannel.PHONE || channel == AudioChannel.NAVIGATION
+        val preferredOutputDevice = if (selectableOutput) resolvePreferredOutputDevice() else null
+        if (channel == AudioChannel.PHONE) {
+            acquirePhoneCommunicationMode()
+            // 指定了头枕等设备但设备不可用时，回退主扬声器，避免车机没有听筒造成完全无声。
+            if (preferredOutputDevice == null) acquirePhoneLoudspeakerRoute()
+        }
         val configuredMainMediaBuffer = MainMediaAudioBuffer.isMainMedia(
             audioType = format.audioType,
             payloadType = format.payloadType,
@@ -936,6 +979,15 @@ private class AudioRenderer(
             .setBufferSizeInBytes(bufferBytes)
             .setTransferMode(AudioTrack.MODE_STREAM)
             .build()
+        if (preferredOutputDevice != null) {
+            val routed = runCatching { track?.setPreferredDevice(preferredOutputDevice) == true }
+                .getOrDefault(false)
+            Log.i(
+                TAG,
+                "audio output preferred device id=${preferredOutputDevice.id} " +
+                    "name=${preferredOutputDevice.productName} routed=$routed",
+            )
+        }
         // AudioTrack consumes 16-bit PCM, so frame size follows the channel mask configured above.
         trackBytesPerFrame = trackChannelCount * BYTES_PER_PCM_16_SAMPLE
         Log.i(
@@ -953,14 +1005,20 @@ private class AudioRenderer(
     }
 
     /**
-     * 电话音频走 phone 策略，配合通信模式默认输出到听筒；车机没有听筒就会静音。
-     * 播放期间同时占用通信模式和扬声器路由，流结束后立即归还。
+     * 电话音频走 phone 策略，默认只在通信模式下才被音频策略激活；车机上不进入通信模式时
+     * 整条语音通信流可能被挂起。播放通话期间始终占用通信模式，流结束后归还。
      */
-    private fun acquirePhoneAudioRoute() {
-        if (!format.audioType.equals(PHONE_AUDIO_TYPE, ignoreCase = true)) return
+    private fun acquirePhoneCommunicationMode() {
         phoneAudioModeLease = runCatching { MicrophoneAudioMode.acquire(context) }
             .onFailure { Log.w(TAG, "phone audio communication mode unavailable", it) }
             .getOrNull()
+    }
+
+    /**
+     * 未指定输出设备时，phone 策略配合通信模式默认走向听筒；车机没有听筒就会静音。
+     * 此时强制占用主扬声器路由，流结束后恢复之前的状态。
+     */
+    private fun acquirePhoneLoudspeakerRoute() {
         phoneAudioRouteLease = runCatching { LoudspeakerAudioRoute.acquire(context) }
             .onFailure { Log.w(TAG, "phone audio loudspeaker route unavailable", it) }
             .getOrNull()
@@ -973,6 +1031,30 @@ private class AudioRenderer(
         phoneAudioModeLease = null
     }
 
+    /**
+     * 通话/导航需要定向输出（如头枕音响）时，先按设备 id 精确匹配；
+     * 设备重新插拔或重启后 id 会变，再用产品名兜底匹配。都失败则返回 null 走系统默认路由。
+     */
+    private fun resolvePreferredOutputDevice(): AudioDeviceInfo? {
+        if (!phoneNavigationOutput.specified) return null
+        val audioManager = context.applicationContext
+            .getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return null
+        val devices = runCatching { audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS) }
+            .getOrDefault(emptyArray())
+        devices.firstOrNull { it.id == phoneNavigationOutput.deviceId }?.let { return it }
+        val name = phoneNavigationOutput.deviceName
+        if (name.isNotBlank()) {
+            devices.firstOrNull { it.productName?.toString()?.equals(name, ignoreCase = true) == true }
+                ?.let { return it }
+        }
+        Log.w(
+            TAG,
+            "preferred output device id=${phoneNavigationOutput.deviceId} name=$name absent; " +
+                "using default route",
+        )
+        return null
+    }
+
     private fun aacAudioSpecificConfig(): ByteArray {
         if (format.codec == AudioCodecKind.AAC_ELD) {
             return AacEldFormat.audioSpecificConfig(format.sampleRate, format.channels,
@@ -981,17 +1063,20 @@ private class AudioRenderer(
         return AacLcFormat.audioSpecificConfig(format.sampleRate, format.channels)
     }
 
+    private fun mappingMode(): AudioChannelMappingMode = if (advancedAudioChannelMapping) {
+        AudioChannelMappingMode.AUTOMOTIVE_BUS
+    } else {
+        AudioChannelMappingMode.MOBILE_COMPATIBLE
+    }
+
+    private fun channelSelection(): AudioChannelSelection = AudioChannelMapper.map(
+        audioType = format.audioType,
+        payloadType = format.payloadType,
+        mode = mappingMode(),
+    )
+
     private fun audioAttributes(): AudioAttributes {
-        val mode = if (advancedAudioChannelMapping) {
-            AudioChannelMappingMode.AUTOMOTIVE_BUS
-        } else {
-            AudioChannelMappingMode.MOBILE_COMPATIBLE
-        }
-        val selection = AudioChannelMapper.map(
-            audioType = format.audioType,
-            payloadType = format.payloadType,
-            mode = mode,
-        )
+        val selection = channelSelection()
         val usage = usageFor(selection.channel)
         val contentType = contentTypeFor(selection.contentType)
         return AudioAttributes.Builder()
@@ -1002,7 +1087,7 @@ private class AudioRenderer(
                 Log.i(
                     TAG,
                     "audio route type=${format.payloadType} audioType=${format.audioType} " +
-                        "mode=$mode channel=${selection.channel} " +
+                        "mode=${mappingMode()} channel=${selection.channel} " +
                         "usage=$usage contentType=$contentType",
                 )
             }
@@ -1315,7 +1400,6 @@ private class AudioRenderer(
 
     private companion object {
         const val TAG = "xcertplay-usb"
-        const val PHONE_AUDIO_TYPE = "telephony"
         const val MIN_OPUS_PACKET_BYTES = 4
         const val INPUT_TIMEOUT_US = 10_000L
         const val MAX_QUEUED_PACKETS = 64

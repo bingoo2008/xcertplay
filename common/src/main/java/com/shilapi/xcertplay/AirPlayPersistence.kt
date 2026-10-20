@@ -12,6 +12,7 @@ import com.shilapi.xcertplay.airplay.AudioQualityProfiles
 import com.shilapi.xcertplay.airplay.PairingStore
 import com.shilapi.xcertplay.airplay.SafeAreaCodec
 import com.shilapi.xcertplay.airplay.SafeAreaRect
+import com.shilapi.xcertplay.media.AudioOutputPreference
 import com.shilapi.xcertplay.media.MainMediaAudioBuffer
 import com.shilapi.xcertplay.media.MicrophoneGain
 import com.shilapi.xcertplay.orchestration.ManualHotspotBand
@@ -44,6 +45,8 @@ object AirPlayPersistence {
     private const val KEY_AUDIO_FOCUS_ENABLED = "audio_focus_enabled"
     private const val KEY_MAIN_MEDIA_AUDIO_BUFFER_DURATION_MS = "main_media_audio_buffer_duration_ms"
     private const val KEY_MICROPHONE_GAIN_PERCENT = "microphone_gain_percent"
+    private const val KEY_PHONE_NAVIGATION_OUTPUT_ID = "phone_navigation_output_id"
+    private const val KEY_PHONE_NAVIGATION_OUTPUT_NAME = "phone_navigation_output_name"
     private const val KEY_WIRELESS_ENABLED = "wireless_enabled"
     private const val KEY_WIFI_HIGH_PERFORMANCE_ENABLED = "wifi_high_performance_enabled"
     private const val KEY_WIRELESS_HOTSPOT_MODE = "wireless_hotspot_mode"
@@ -227,6 +230,20 @@ object AirPlayPersistence {
     fun saveMicrophoneGainPercent(context: Context, percent: Int) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putInt(KEY_MICROPHONE_GAIN_PERCENT, MicrophoneGain.sanitize(percent))
+            .apply()
+    }
+
+    fun loadPhoneNavigationOutput(context: Context): AudioOutputPreference {
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val deviceId = prefs.getInt(KEY_PHONE_NAVIGATION_OUTPUT_ID, -1)
+        val deviceName = prefs.getString(KEY_PHONE_NAVIGATION_OUTPUT_NAME, null).orEmpty()
+        return if (deviceId >= 0) AudioOutputPreference(deviceId, deviceName) else AudioOutputPreference.DEFAULT
+    }
+
+    fun savePhoneNavigationOutput(context: Context, output: AudioOutputPreference) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putInt(KEY_PHONE_NAVIGATION_OUTPUT_ID, output.deviceId)
+            .putString(KEY_PHONE_NAVIGATION_OUTPUT_NAME, output.deviceName)
             .apply()
     }
 

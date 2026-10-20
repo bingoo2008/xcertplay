@@ -16,6 +16,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.SurfaceTexture
+import android.media.AudioDeviceInfo
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -162,6 +163,9 @@ import com.shilapi.xcertplay.vehicle.VehicleDataFeature
 import com.shilapi.xcertplay.vehicle.VehicleLocationProvider
 import com.shilapi.xcertplay.location.AndroidCarPlayLocationProvider
 import com.shilapi.xcertplay.media.AndroidMediaSink
+import com.shilapi.xcertplay.media.AudioOutputDevice
+import com.shilapi.xcertplay.media.AudioOutputDevices
+import com.shilapi.xcertplay.media.AudioOutputPreference
 import com.shilapi.xcertplay.media.CarPlayTouchMapper
 import com.shilapi.xcertplay.media.MainMediaAudioBuffer
 import com.shilapi.xcertplay.media.MediaMetricsMonitor
@@ -531,6 +535,8 @@ class CarPlayHostActivity : ComponentActivity() {
     private var microphoneAvailable = false
     private var microphonePermissionResolved = false
     private var microphoneGainPercent by mutableIntStateOf(MicrophoneGain.DEFAULT_PERCENT)
+    private var phoneNavigationOutput by mutableStateOf(AudioOutputPreference.DEFAULT)
+    private var phoneNavigationDevices by mutableStateOf<List<AudioOutputDevice>>(emptyList())
     private var wirelessEnabled by mutableStateOf(false)
     private var wifiHighPerformanceEnabled by mutableStateOf(true)
     private var mfiTarget by mutableStateOf(MfiTarget.USB_CH341)
@@ -728,6 +734,7 @@ class CarPlayHostActivity : ComponentActivity() {
         mainMediaAudioBufferDurationMs =
             AirPlayPersistence.loadMainMediaAudioBufferDurationMs(this)
         microphoneGainPercent = AirPlayPersistence.loadMicrophoneGainPercent(this)
+        phoneNavigationOutput = AirPlayPersistence.loadPhoneNavigationOutput(this)
         debugLogsEnabled = AirPlayPersistence.loadDebugLogsEnabled(this)
         videoFrameLogsEnabled = AirPlayPersistence.loadVideoFrameLogsEnabled(this)
         sessionLog.videoFramesEnabled = videoFrameLogsEnabled
@@ -1238,6 +1245,7 @@ class CarPlayHostActivity : ComponentActivity() {
             mainMediaAudioBufferDurationMs,
         )
         AirPlayPersistence.saveMicrophoneGainPercent(this, microphoneGainPercent)
+        AirPlayPersistence.savePhoneNavigationOutput(this, phoneNavigationOutput)
         AirPlayPersistence.saveDisplayScaleTenths(this, displayScaleTenths)
         AirPlayPersistence.saveFps(this, fps)
         AirPlayPersistence.saveWidthPhysicalMm(this, widthPhysicalMm)
@@ -1948,6 +1956,7 @@ class CarPlayHostActivity : ComponentActivity() {
                 },
                 preferSoftwareHevcDecoder = hevcSoftwareDecoderEnabled,
                 advancedAudioChannelMapping = advancedAudioChannelMapping,
+                phoneNavigationOutput = phoneNavigationOutput,
                 mainMediaAudioBufferDurationMs = mainMediaAudioBufferDurationMs,
                 microphoneGainPercent = microphoneGainPercent,
                 mediaMetricsMonitor = mediaMetricsMonitor,
@@ -2434,6 +2443,7 @@ class CarPlayHostActivity : ComponentActivity() {
         updateVehicleDataStatus()
         lastVehicleDataDiagnostics = vehicleDataStatusText
         stopMicrophoneGainTest()
+        refreshPhoneNavigationDevices()
         settingsBaseline = captureSettingsBaseline()
         menuOpen = true
         updateVehicleDataStatus()
@@ -3670,6 +3680,18 @@ class CarPlayHostActivity : ComponentActivity() {
                     onIndexChange = { mainMediaAudioBufferDurationMs = bufferValues[it] },
                 )
             }
+            row {
+                SelectRow(
+                    title = tr("settings.audio.output_device"),
+                    support = tr("settings.audio.output_device.support"),
+                    options = buildList {
+                        add(-1 to tr("settings.audio.output_device.default"))
+                        phoneNavigationDevices.forEach { add(it.id to phoneNavigationDeviceLabel(it)) }
+                    },
+                    selected = phoneNavigationOutput.deviceId,
+                    onSelected = ::onPhoneNavigationOutputSelected,
+                )
+            }
             if (advancedAudioChannelMappingSupported) {
                 row {
                     SwitchRow(
@@ -4440,6 +4462,48 @@ class CarPlayHostActivity : ComponentActivity() {
         }
         appendLog("Audio focus ${if (checked) "enabled" else "disabled"}")
     }
+
+    private fun refreshPhoneNavigationDevices() {
+        phoneNavigationDevices = AudioOutputDevices.list(this)
+    }
+
+    private fun onPhoneNavigationOutputSelected(deviceId: Int) {
+        val name = if (deviceId < 0) {
+            ""
+        } else {
+            phoneNavigationDevices.firstOrNull { it.id == deviceId }?.name.orEmpty()
+        }
+        phoneNavigationOutput =
+            if (deviceId < 0) AudioOutputPreference.DEFAULT else AudioOutputPreference(deviceId, name)
+        appendLog(
+            "Phone/navigation output: ${name.ifBlank { "system default" }}; applies when settings close",
+        )
+    }
+
+    private fun phoneNavigationDeviceLabel(device: AudioOutputDevice): String {
+        val type = phoneNavigationDeviceTypeLabel(device.type)
+        return if (device.name.isBlank()) type else "${device.name} ($type)"
+    }
+
+    private fun phoneNavigationDeviceTypeLabel(type: Int): String = tr(
+        when (type) {
+            AudioDeviceInfo.TYPE_BUILTIN_SPEAKER,
+            AudioDeviceInfo.TYPE_BUILTIN_SPEAKER_SAFE,
+            AudioDeviceInfo.TYPE_BUILTIN_EARPIECE -> "settings.audio.output_device.type.speaker"
+            AudioDeviceInfo.TYPE_WIRED_HEADSET,
+            AudioDeviceInfo.TYPE_WIRED_HEADPHONES -> "settings.audio.output_device.type.headset"
+            AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
+            AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> "settings.audio.output_device.type.bluetooth"
+            AudioDeviceInfo.TYPE_USB_DEVICE,
+            AudioDeviceInfo.TYPE_USB_HEADSET,
+            AudioDeviceInfo.TYPE_USB_ACCESSORY -> "settings.audio.output_device.type.usb"
+            AudioDeviceInfo.TYPE_HDMI,
+            AudioDeviceInfo.TYPE_HDMI_ARC,
+            AudioDeviceInfo.TYPE_HDMI_EARC -> "settings.audio.output_device.type.hdmi"
+            AudioDeviceInfo.TYPE_BUS -> "settings.audio.output_device.type.bus"
+            else -> "settings.audio.output_device.type.other"
+        },
+    )
 
     private fun onHevcChanged(checked: Boolean) {
         if (hevcEnabled == checked) return
