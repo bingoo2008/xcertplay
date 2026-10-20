@@ -788,14 +788,38 @@ private fun MediaFormat.intOrNull(key: String): Int? =
     }
 
 /**
- * 通话与导航音频的目标输出设备（例如车机头枕音响）。
- * [deviceId] 小于 0 表示未指定，走系统默认路由；[deviceName] 供设备重新枚举后用名称兜底匹配。
+ * 通话与导航音频的输出路由方式。
+ *
+ * 参考 AutoChips 方案车机（如银河 L7）的实机行为：应用侧不做任何设备定向，
+ * 仅按 USAGE_VOICE_COMMUNICATION / USAGE_ASSISTANCE_NAVIGATION_GUIDANCE 播放，
+ * 由车机音频策略自动把通话与导航送到头枕音响。因此 SYSTEM 是默认且推荐值。
  */
-data class AudioOutputPreference(val deviceId: Int, val deviceName: String = "") {
-    val specified: Boolean get() = deviceId >= 0
+enum class PhoneNavigationOutputRouting {
+    /** 跟随车机音频策略（默认，多数车型通话/导航自动从头枕输出）。 */
+    SYSTEM,
+
+    /** 强制通话走主扬声器（用于默认路由无声的机型兜底）。 */
+    SPEAKER,
+
+    /** 手动指定输出设备（按设备 id + 名称匹配，如头枕音响）。 */
+    DEVICE,
+}
+
+/**
+ * 通话与导航音频的输出偏好。
+ * [PhoneNavigationOutputRouting.DEVICE] 时 [deviceId] 必须有效；
+ * [deviceName] 供设备重新枚举后用名称兜底匹配。
+ */
+data class AudioOutputPreference(
+    val routing: PhoneNavigationOutputRouting = PhoneNavigationOutputRouting.SYSTEM,
+    val deviceId: Int = -1,
+    val deviceName: String = "",
+) {
+    val specified: Boolean
+        get() = routing == PhoneNavigationOutputRouting.DEVICE && deviceId >= 0
 
     companion object {
-        val DEFAULT = AudioOutputPreference(deviceId = -1)
+        val DEFAULT = AudioOutputPreference()
     }
 }
 
@@ -945,8 +969,11 @@ private class AudioRenderer(
         val preferredOutputDevice = if (selectableOutput) resolvePreferredOutputDevice() else null
         if (channel == AudioChannel.PHONE) {
             acquirePhoneCommunicationMode()
-            // 指定了头枕等设备但设备不可用时，回退主扬声器，避免车机没有听筒造成完全无声。
-            if (preferredOutputDevice == null) acquirePhoneLoudspeakerRoute()
+            // 仅在用户显式选择主扬声器时才强制扬声器路由；
+            // 跟随系统时保持 isSpeakerphoneOn 原状，让车机策略自行决定（如银河 L7 会送头枕）。
+            if (phoneNavigationOutput.routing == PhoneNavigationOutputRouting.SPEAKER) {
+                acquirePhoneLoudspeakerRoute()
+            }
         }
         val configuredMainMediaBuffer = MainMediaAudioBuffer.isMainMedia(
             audioType = format.audioType,
@@ -1015,8 +1042,9 @@ private class AudioRenderer(
     }
 
     /**
-     * 未指定输出设备时，phone 策略配合通信模式默认走向听筒；车机没有听筒就会静音。
-     * 此时强制占用主扬声器路由，流结束后恢复之前的状态。
+     * 车机默认路由下语音通信流可能走向不存在的听筒导致无声，此模式强制主扬声器输出，
+     * 流结束后恢复之前的扬声器开关状态。仅在用户显式选择"主扬声器"时使用；
+     * 跟随系统模式不调用，以免覆盖车机自身的头枕等路由策略。
      */
     private fun acquirePhoneLoudspeakerRoute() {
         phoneAudioRouteLease = runCatching { LoudspeakerAudioRoute.acquire(context) }

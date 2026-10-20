@@ -166,6 +166,7 @@ import com.shilapi.xcertplay.media.AndroidMediaSink
 import com.shilapi.xcertplay.media.AudioOutputDevice
 import com.shilapi.xcertplay.media.AudioOutputDevices
 import com.shilapi.xcertplay.media.AudioOutputPreference
+import com.shilapi.xcertplay.media.PhoneNavigationOutputRouting
 import com.shilapi.xcertplay.media.CarPlayTouchMapper
 import com.shilapi.xcertplay.media.MainMediaAudioBuffer
 import com.shilapi.xcertplay.media.MediaMetricsMonitor
@@ -3685,10 +3686,11 @@ class CarPlayHostActivity : ComponentActivity() {
                     title = tr("settings.audio.output_device"),
                     support = tr("settings.audio.output_device.support"),
                     options = buildList {
-                        add(-1 to tr("settings.audio.output_device.default"))
+                        add(SELECT_PHONE_NAVIGATION_SYSTEM to tr("settings.audio.output_device.default"))
+                        add(SELECT_PHONE_NAVIGATION_SPEAKER to tr("settings.audio.output_device.speaker"))
                         phoneNavigationDevices.forEach { add(it.id to phoneNavigationDeviceLabel(it)) }
                     },
-                    selected = phoneNavigationOutput.deviceId,
+                    selected = phoneNavigationOutputSelectedKey(),
                     onSelected = ::onPhoneNavigationOutputSelected,
                 )
             }
@@ -4467,17 +4469,28 @@ class CarPlayHostActivity : ComponentActivity() {
         phoneNavigationDevices = AudioOutputDevices.list(this)
     }
 
-    private fun onPhoneNavigationOutputSelected(deviceId: Int) {
-        val name = if (deviceId < 0) {
-            ""
-        } else {
-            phoneNavigationDevices.firstOrNull { it.id == deviceId }?.name.orEmpty()
+    private fun phoneNavigationOutputSelectedKey(): Int = when (phoneNavigationOutput.routing) {
+        PhoneNavigationOutputRouting.SYSTEM -> SELECT_PHONE_NAVIGATION_SYSTEM
+        PhoneNavigationOutputRouting.SPEAKER -> SELECT_PHONE_NAVIGATION_SPEAKER
+        PhoneNavigationOutputRouting.DEVICE -> phoneNavigationOutput.deviceId
+    }
+
+    private fun onPhoneNavigationOutputSelected(selectedId: Int) {
+        phoneNavigationOutput = when (selectedId) {
+            SELECT_PHONE_NAVIGATION_SYSTEM -> AudioOutputPreference.DEFAULT
+            SELECT_PHONE_NAVIGATION_SPEAKER ->
+                AudioOutputPreference(routing = PhoneNavigationOutputRouting.SPEAKER)
+            else -> {
+                val name = phoneNavigationDevices.firstOrNull { it.id == selectedId }?.name.orEmpty()
+                AudioOutputPreference(PhoneNavigationOutputRouting.DEVICE, selectedId, name)
+            }
         }
-        phoneNavigationOutput =
-            if (deviceId < 0) AudioOutputPreference.DEFAULT else AudioOutputPreference(deviceId, name)
-        appendLog(
-            "Phone/navigation output: ${name.ifBlank { "system default" }}; applies when settings close",
-        )
+        val label = when (phoneNavigationOutput.routing) {
+            PhoneNavigationOutputRouting.SYSTEM -> "system default"
+            PhoneNavigationOutputRouting.SPEAKER -> "main speaker"
+            PhoneNavigationOutputRouting.DEVICE -> phoneNavigationOutput.deviceName
+        }
+        appendLog("Phone/navigation output: $label; applies when settings close")
     }
 
     private fun phoneNavigationDeviceLabel(device: AudioOutputDevice): String {
@@ -4613,6 +4626,10 @@ class CarPlayHostActivity : ComponentActivity() {
         const val EDGE_SETTINGS_SWIPE_DIRECTION_RATIO = 1.15f
         /** Movement past the slop in another direction abandons the edge-settings gesture. */
         const val EDGE_SETTINGS_TOUCH_SLOP_DP = 16
+        /** 设置界面选择器占位值：跟随车机系统路由。 */
+        const val SELECT_PHONE_NAVIGATION_SYSTEM = -1
+        /** 设置界面选择器占位值：强制主扬声器。 */
+        const val SELECT_PHONE_NAVIGATION_SPEAKER = -2
         val TWO_PANE_MIN_WIDTH = 720.dp
         val CATEGORY_PANE_WIDTH = 320.dp
         val NO_VIDEO_BACKGROUND = Color.BLACK
